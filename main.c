@@ -1,8 +1,8 @@
 /*
   
-  mdnssd-mini
+  whoisrunning
 
-  mdnssd-mini is a minimal DNS-SD and mDNS client that takes a service type
+  whoisrunning is a minimal DNS-SD and mDNS client that takes a service type
   as its argument and returns the IPv4 and/or IPv6 addreses and port numbers
   running a service of the type.
 
@@ -96,16 +96,16 @@ mDNSFlags* mdns_parse_header_flags(uint16_t data) {
   if(!flags) {
     fail("could not allocate memory for parsing header flags");
   }
-  flags->rcode = data & 0xfff0;
-  flags->cd = (data >> 4) & 0xfffe;
-  flags->ad = (data >> 5) & 0xfffe;
-  flags->zero = (data >> 6) & 0xfffe;
-  flags->ra = (data >> 7) & 0xfffe;
-  flags->rd = (data >> 8) & 0xfffe;
-  flags->tc = (data >> 9) & 0xfffe;
-  flags->aa = (data >> 10) & 0xfffe;
-  flags->opcode = (data >> 14) & 0xfff0;
-  flags->qr = (data >> 15) & 0xfffe;
+  flags->rcode = data & 0xf;
+  flags->cd = (data >> 4) & 1;
+  flags->ad = (data >> 5) & 1;
+  flags->zero = (data >> 6) & 1;
+  flags->ra = (data >> 7) & 1;
+  flags->rd = (data >> 8) & 1;
+  flags->tc = (data >> 9) & 1;
+  flags->aa = (data >> 10) & 1;
+  flags->opcode = (data >> 14) & 0xf;
+  flags->qr = (data >> 15) & 1;
 
   return flags;
 }

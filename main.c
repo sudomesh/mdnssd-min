@@ -35,14 +35,18 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <time.h>
 
+#define PROGRAM_NAME "mdnssd"
 #define DNS_HEADER_SIZE (12)
-#define DNS_MAX_DOMAIN_NAME_LENGTH (253)
+#define DNS_MAX_HOSTNAME_LENGTH (253)
+#define DNS_MAX_LABEL_LENGTH (63)
 #define MDNS_MULTICAST_ADDRESS "224.0.0.251"
 #define MDNS_PORT (5353)
+#define DNS_BUFFER_SIZE (32768)
 
-// TODO no idea what the correct value for this is
-#define DNS_MAX_MESSAGE_SIZE (51200)
+// TODO find the right number for this
+#define DNS_MESSAGE_MAX_SIZE (4096)
 
 struct mDNSPacketStruct{
   uint16_t id;
@@ -76,10 +80,50 @@ typedef struct {
   int prefer_unicast_response;
 } mDNSQuestion;
 
+
+void usage(char* argv0) {
+  fprintf(stderr, "Usage: %s <hostname.local>\n", argv0);
+}
+
 void fail(char* msg) {
   //  fprintf(stderr, "Error: %s\n", msg);
   perror(msg);
   exit(1);
+}
+
+// parse and sanitize hostname
+// TODO rewrite this based on notes in RFC6763 secion 4.1.1
+char* parse_hostname(char* hostname) {
+  // TODO ensure that hostnames have
+  // at most 127 levels
+  // labels with 1 to 63 octets
+  char* result;
+  int i;
+  int hostname_length = strlen(hostname);
+  if((hostname_length < 1) || (hostname_length > DNS_MAX_HOSTNAME_LENGTH)) {
+    return NULL;
+  }
+  result = malloc(hostname_length);
+  if(!result) {
+    fail("failed to allocate memory for parsed hostname");
+  }
+  
+  for(i=0; i < hostname_length; i++) {
+    
+    if(hostname[i] == '.') { // dot
+      result[i] = 0x05;
+    } else if((hostname[i] == 0x05) || // alternative to dot
+            (hostname[i] == '-') || // dash
+            ((hostname[i] >= 48) && (hostname[i] <= 57)) || // numeric 0-9
+            ((hostname[i] >= 97) && (hostname[i] <= 122))) { // lower case letters a-z
+      
+      result[i] = hostname[i];
+    } else {
+      free(result);
+      return NULL;
+    }
+  }
+  return result;
 }
 
 mDNSPacket* mdns_make_packet() {
@@ -136,7 +180,7 @@ char* mdns_pack_question(mDNSQuestion* q, size_t* size) {
 
   
   name_length = strlen(q->qname);
-  if(name_length > DNS_MAX_DOMAIN_NAME_LENGTH) {
+  if(name_length > DNS_MAX_HOSTNAME_LENGTH) {
     fail("domain name too long");
   }
 
@@ -197,13 +241,8 @@ void mdns_packet_print(mDNSPacket* packet) {
 }
 
 // TODO this only parses the header so far
-mDNSPacket* mdns_parse_packet_net(char* data) {
-  mDNSPacket* packet;
-  packet = malloc(sizeof(mDNSPacket));
-  if(!packet) {
-    fail("could not allocating memory for parsing packet");
-  }
-  
+int mdns_parse_packet_net(char* data, mDNSPacket* packet) {
+
   memcpy(packet, data, DNS_HEADER_SIZE);
   packet->id = ntohs(packet->id);
   packet->flags = ntohs(packet->flags);
@@ -212,12 +251,14 @@ mDNSPacket* mdns_parse_packet_net(char* data) {
   packet->ns_count = ntohs(packet->ns_count);
   packet->ar_count = ntohs(packet->ar_count);
 
+  // TODO use memcpy
   packet->data = data+DNS_HEADER_SIZE;
 
-  return packet;
+  // TODO actually parse the rest of message and find real parse size
+  return 100;
 }
 
-mDNSPacket* mdns_build_query_packet() {
+mDNSPacket* mdns_build_query_packet(char* hostname) {
   mDNSPacket* packet = mdns_make_packet();
   mDNSQuestion question;
   mDNSFlags flags;
@@ -237,7 +278,11 @@ mDNSPacket* mdns_build_query_packet() {
   packet->flags = htons(mdns_pack_header_flags(flags));
   packet->qd_count = htons(1); // one question
 
-  question.qname = "\x05space\x05local"; // TODO get this from ARGV
+  question.qname = parse_hostname(hostname); // TODO get this from ARGV
+  //  question.qname = hostname; // TODO get this from ARGV
+  if(!question.qname) {
+    return NULL;
+  }
   question.prefer_unicast_response = 0; 
   question.qtype = 1; // an A record (RFC 1035 section 3.2.2)
   question.qclass = 1; // class for the internet (RFC 1035 section 3.2.4)
@@ -251,7 +296,7 @@ char* mdns_pack_packet(mDNSPacket* packet, size_t* pack_length) {
   char* pack;
 
   *pack_length = DNS_HEADER_SIZE + packet->data_size;
-  if(*pack_length > DNS_MAX_MESSAGE_SIZE) {
+  if(*pack_length > DNS_MESSAGE_MAX_SIZE) {
     fail("mDNS message too large");
   }
 
@@ -259,8 +304,6 @@ char* mdns_pack_packet(mDNSPacket* packet, size_t* pack_length) {
   if(!pack) {
     fail("failed to allocate data for packed mDNS packet");
   }
-  
-  //  printf("packet data size: %u\n", packet->data_size);
 
   memcpy(pack, packet, DNS_HEADER_SIZE);
   memcpy(pack + DNS_HEADER_SIZE, packet->data, packet->data_size);
@@ -268,19 +311,62 @@ char* mdns_pack_packet(mDNSPacket* packet, size_t* pack_length) {
   return pack;
 }
 
-int main() {
+// data is the input data
+// packet is where the parsed packet is written
+// returns the number of bytes consumed if succesfully parsed a DNS message
+// returns 0 if more bytes needed to parse another DNS message
+// returns -1 on error
+int parse_received(char* data, int* answer_counter) {
+  int res;
+  mDNSPacket packet;
+
+  res = mdns_parse_packet_net(data, &packet);
+  if(packet.an_count <= 0) {
+    printf("received non-answer message. skipping.\n");
+    return res;
+  }
+  if(res > 0) {
+    // TODO check packet answers against query
+    mdns_packet_print(&packet);
+    // TODO free memory allocated for packet
+  }
+
+  return res;
+}
+
+
+int main(int argc, char* argv[]) {
 
   mDNSPacket* packet;
   char* data;
   size_t data_size;
   struct sockaddr_in addr;
+  struct sockaddr_in last_addr;
   socklen_t addrlen;
   struct ip_mreq mreq;
   int sock;
   int res;
-  char recvdata[9000];
+  int resp;
+  int parsed;
+  char* recvdata;
+  int answer_counter = 0; // how many answers have been received
 
-  packet = mdns_build_query_packet();
+  recvdata = malloc(DNS_BUFFER_SIZE);
+  if(!recvdata) {
+    fail("could not allocate memory for temporary storage");
+  }
+  
+  if(argc != 2) {
+    if(argc > 0) {
+      usage(argv[0]);
+    } else {
+      usage(PROGRAM_NAME);
+    }
+    exit(1);
+  }
+
+  // build the query message
+  packet = mdns_build_query_packet(argv[1]);
   data = mdns_pack_packet(packet, &data_size);
 
   sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -300,30 +386,39 @@ int main() {
   }
 
   mreq.imr_multiaddr.s_addr = inet_addr(MDNS_MULTICAST_ADDRESS);
-  mreq.imr_interface.s_addr = htonl(INADDR_ANY); // TODO understand this;
-  
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY); // TODO understand this  
   if(setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
     fail("setsockopt failed");
   } 
 
   printf("sending query with length: %u\n", data_size);
-  //  printf("content: %s\n", packet+DNS_HEADER_SIZE);
+  // send query message
   res = sendto(sock, data, data_size, 0, (struct sockaddr *) &addr, addrlen);
 
+  // keep receiving data indefinitely
   while(1) {
     printf("waiting for data\n");
-    res = recvfrom(sock, recvdata, 9000, 0, (struct sockaddr *) &addr, &addrlen);
+    // note: DNS messages should arrive as single packets, so we don't need to worry
+    //       about partially received messages
+    res = recvfrom(sock, recvdata, DNS_BUFFER_SIZE, 0, (struct sockaddr *) &addr, &addrlen);
     if(res < 0) {
       fail("error receiving");
     } else if(res == 0) {
       fail("unknown error"); // TODO for TCP means connection closed, but for UDP?
     }
-    
     printf("got data from %s\n", inet_ntoa(addr.sin_addr));
-    
-    packet = mdns_parse_packet_net(recvdata);
-    mdns_packet_print(packet);
+
+    parsed = 0;
+    do {
+      resp = parse_received(recvdata, &answer_counter);
+      // if nothing else is parsable, stop parsing
+      if(resp <= 0) {
+        break;
+      }
+      parsed += resp;
+    } while(parsed < res); // while there is still something to parse
   }
 
+  free(recvdata);  
   return 0;
 }

@@ -35,6 +35,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <unistd.h>
 #include <time.h>
 
 #define PROGRAM_NAME "mdnssd"
@@ -49,11 +50,17 @@
 #define DNS_MESSAGE_MAX_SIZE (4096)
 
 // DNS Resource Record types
+// (RFC 1035 section 3.2.2)
 #define DNS_RR_TYPE_A (1)
 #define DNS_RR_TYPE_CNAME (5)
 #define DNS_RR_TYPE_PTR (12)
 #define DNS_RR_TYPE_TXT (16)
 #define DNS_RR_TYPE_SRV (33)
+
+// TODO not sure about this
+#define MAX_RR_NAME_SIZE (256)
+
+#define MAX_DEREFERENCE_COUNT (40)
 
 // The maximum number of answers allowed
 #define MAX_ANSWERS (20)
@@ -100,8 +107,9 @@ typedef struct {
 } mDNSResourceRecord;
 
 typedef struct {
-  char* str;
+  char* name;
   struct in_addr addr;
+  unsigned short port;
   int type;
 } FoundAnswer;
 
@@ -125,6 +133,14 @@ void fail(char* msg) {
   exit(1);
 }
 
+void init_answer_list(FoundAnswerList* alist) {
+  int i;
+  for(i=0; i < MAX_ANSWERS; i++) {
+    alist->answers[i] = NULL;
+  }
+  alist->length = 0;
+}
+
 FoundAnswer* add_answer(FoundAnswerList* alist) {
   FoundAnswer* a;
   if(alist->length >= MAX_ANSWERS) {
@@ -135,44 +151,50 @@ FoundAnswer* add_answer(FoundAnswerList* alist) {
     fail("Could not allocate memory for a found answer");
   }
 
+  a->name = NULL;
   alist->answers[alist->length] = a;
   alist->length++;
   return a;
 }
 
-
-char* prepare_domain_name(char* name) {
+void clear_answer_list(FoundAnswerList* alist) {
   int i;
-  int offset;
-  int length = strlen(name);
+  for(i=0; i < MAX_ANSWERS; i++) {
+    if(alist->answers[i]) {
+      if(alist->answers[i]->name) {
+        free(alist->answers[i]->name);
+      }
+      free(alist->answers[i]);
+    }
+  }
+  alist->length = 0;
+}
+
+
+char* prepare_query_string(char* name) {
+  int i;
+  int count;
+  int lastdot = 0;
+  int len = strlen(name);
   char* result;
 
-  if(length < 1) {
-    return NULL;
-  }
-
-  result = malloc(length + 2);
+  result = malloc(len + 2);
   if(!result) {
     fail("failed to allocate memory for parsed hostname");
   }
 
-  if((name[0] != '.') && (name[0] != 0x05)) {
-    // prepend with dot since it was missing
-    result[0] = 0x05;
-    offset = 1;
-  } else {
-    offset = 0;
-  }
-
-
-  for(i=0; i < length; i++) {
-    if(name[i] == '.') { // dot
-      result[i+offset] = 0x05;
-    } else {
-      result[i+offset] = name[i];
+  count = 0;
+  for(i=0; i < len+1; i++) {
+    if((name[i] == '.') || (name[i] == '\0')) {
+      result[lastdot] = (char) count;
+      count = 0;
+      lastdot = i+1;
+      continue;
     }
+    result[i+1] = name[i];
+    count++;
   }
-  result[length+offset] = '\0';
+  result[len+1] = '\0';  
 
   return result;
 }
@@ -272,7 +294,7 @@ char* mdns_pack_question(mDNSQuestion* q, size_t* size) {
 
   printf("name length: %u\n", name_length);
 
-  *size = name_length + 1 + 2 + 2;
+  *size = name_length + 2 + 2;
 
   // 1 char for terminating \0, 2 for qtype and 2 for qclass
   packed = malloc(*size);
@@ -280,9 +302,7 @@ char* mdns_pack_question(mDNSQuestion* q, size_t* size) {
     fail("could not allocate memory for DNS question");
   }
 
-  packed[0] = 0x05;
-  memcpy(packed+1, q->qname, name_length);
-  packed[name_length] = '\0';
+  memcpy(packed, q->qname, name_length);
 
   // The top bit of the qclass field is repurposed by mDNS
   // to indicate that a unicast response is preferred
@@ -294,8 +314,8 @@ char* mdns_pack_question(mDNSQuestion* q, size_t* size) {
   qtype = htons(q->qtype);
   qclass = htons(q->qclass);
 
-  memcpy(packed + name_length + 1, &qtype, 2);
-  memcpy(packed + name_length + 3, &qclass, 2);
+  memcpy(packed + name_length, &qtype, 2);
+  memcpy(packed + name_length + 2, &qclass, 2);
 
   return packed;
 }
@@ -362,6 +382,25 @@ int mdns_parse_question(char* data, int size) {
   return parsed;
 }
 
+void print_rr_name(char* name) {
+  int i;
+  int label_len;
+  int len = strlen(name);
+  if(len < 1) {
+    return;
+  }
+  label_len = (int) name[0];
+  for(i=1; i < len; i++) {
+    if(label_len == 0) {
+      printf(".");
+      label_len = (int) name[i];
+      continue;
+    }
+    printf("%c", name[i]);
+    label_len--;
+  }
+}
+
 // parse A resource record
 int mdns_parse_rr_a(char* data, FoundAnswerList* alist) {
   FoundAnswer* a;
@@ -369,19 +408,32 @@ int mdns_parse_rr_a(char* data, FoundAnswerList* alist) {
   a = add_answer(alist);
   memcpy(&(a->addr), data, 4);
 
-  printf("%s\n", inet_ntoa(a->addr));
+  printf("A: %s\n", inet_ntoa(a->addr));
 
   return 4;
 }
 
-// parse CNAME resource record
-int mdns_parse_rr_cname(char* data) {
+// parse PTR resource record
+int mdns_parse_rr_ptr(char* data, FoundAnswerList* alist) {
+  int len;
+  FoundAnswer* a;
 
-  return 0;
+  a = add_answer(alist);
+  len = strlen(data) + 1;
+  a->name = malloc(len);
+  if(!a->name) {
+    fail("failed to allocate memory for PTR name");
+  }
+  memcpy(a->name, data, len);
+
+  printf("PTR: %s\n", a->name);
+  //  print_rr_name(a->name);
+
+  return len;
 }
 
-// parse PTR resource record
-int mdns_parse_rr_ptr(char* data) {
+// parse CNAME resource record
+int mdns_parse_rr_cname(char* data) {
 
   return 0;
 }
@@ -398,6 +450,99 @@ int mdns_parse_rr_srv(char* data) {
   return 0;
 }
 
+// get name compression offset
+uint16_t get_offset(char* data) {
+  uint16_t offset;
+
+  memcpy(&offset, data, 2);
+  offset = ntohs(offset);
+
+  //  printf("POSSIBLE OFFSET: 0x%x 0x%x\n", data[1], data[0]);
+
+  if((offset >> 14) & 3) {
+    // this means that the name is a reference to 
+    // a string instead of a string
+    offset &= 0x3fff; // change two most significant bits to 0
+    return offset;
+  }
+  return 0;
+
+};
+
+
+char* parse_rr_name(char* message, char* name, int* parsed) {
+
+  int dereference_count = 0;
+  uint16_t offset;
+  int label_len;
+  char* out;
+  int out_i = 0;
+  int i = 0;
+  int did_jump = 0;
+  int pars = 0;
+
+  out = malloc(MAX_RR_NAME_SIZE);
+  if(!out) {
+    fail("could not allocate memory for resource record name");
+  }
+  //  printf("-- NAME\n");
+  while(1) {
+    offset = get_offset(name);
+    if(offset) {
+      if(!did_jump) {
+        pars += 2; // parsed two bytes before jump
+      }
+      did_jump = 1;
+      //      printf("--- JUMP!\n");
+      name = message + offset;
+      dereference_count++;
+      if(dereference_count >= MAX_DEREFERENCE_COUNT) {
+        // don't allow messages to crash this app
+        free(out);
+        return NULL;
+      }
+      continue;
+    }
+    // insert a dot between labels
+    if(out_i > 0) {
+      out[out_i++] = '.';
+
+      if(out_i+1 >= MAX_RR_NAME_SIZE) {
+        free(out);
+        return NULL;
+      }
+    }
+    // it wasn't an offset, so it must be a length
+    label_len = (int) name[0];
+    name++;
+    if(!did_jump) {
+      pars++;
+    }
+    for(i=0; i < label_len; i++) {
+      out[out_i++] = name[i];
+      //      printf("---- %c\n", name[i]);
+      if(out_i+1 >= MAX_RR_NAME_SIZE) {
+        free(out);
+        return NULL;
+      }
+      if(!did_jump) {
+        pars++;
+      }
+    }
+    name += label_len;
+    if(name[0] == '\0') {
+      //      printf("---- END\n");
+      out[out_i] = '\0';
+      if(!did_jump) {
+        pars++;
+      }
+      *parsed += pars;
+      return out;
+    }
+  }
+}
+
+
 void mdns_parse_rdata_for_answers(mDNSResourceRecord* rr, FoundAnswerList* alist) {
 
   // if the resource record is not relevant
@@ -410,8 +555,10 @@ void mdns_parse_rdata_for_answers(mDNSResourceRecord* rr, FoundAnswerList* alist
   case DNS_RR_TYPE_A:
     mdns_parse_rr_a(rr->rdata, alist);
     break;
-  case DNS_RR_TYPE_CNAME:
   case DNS_RR_TYPE_PTR:
+    mdns_parse_rr_ptr(rr->rdata, alist);
+    break;
+  case DNS_RR_TYPE_CNAME:
   case DNS_RR_TYPE_TXT:
   case DNS_RR_TYPE_SRV:
   default:
@@ -419,27 +566,46 @@ void mdns_parse_rdata_for_answers(mDNSResourceRecord* rr, FoundAnswerList* alist
   }
 }
 
+void free_resource_record(mDNSResourceRecord* rr) {
+  if(!rr) {
+    return;
+  }
+  if(rr->name) {
+    free(rr->name);
+  }
+  free(rr);
+}
+
 // parse a resource record
 // the answer, authority and additional sections all use the resource record format
-int mdns_parse_rr(char* data, int size, FoundAnswerList* alist, int is_answer) {
+int mdns_parse_rr(char* message, char* rrdata, int size, FoundAnswerList* alist, int is_answer) {
   mDNSResourceRecord* rr;
   int parsed = 0;
-  char* cur = data;
+  char* cur = rrdata;
   rr = malloc(sizeof(mDNSResourceRecord));
+  rr->name = NULL;
 
-  // TODO check for invalid length
-  parsed = strlen(cur) + 1;
+  rr->name = parse_rr_name(message, rrdata, &parsed);
+  if(!rr->name) {
+    printf("FAAAAAAAAAAAAIL\n");
+    return 0;
+  }
+
+  printf("parsed: %u\n", parsed);
+
   cur += parsed;
 
   // +10 because type, class, ttl and rdata_lenth total 10 bytes
   if(parsed+10 > size) {
-    free(rr);
+    free_resource_record(rr);
     return 0;
   }
 
-  rr->name = data;
-
-  printf("  Resource Record for %s:\n", rr->name);
+  printf("  Resource Record Name: %s\n", rr->name);
+  //  printf("  Resource Record for ");
+  //  print_rr_name(rr->name);
+  //  printf(":\n");
+  printf("------------------------------\n");
 
   memcpy(&(rr->type), cur, 2);
   rr->type = ntohs(rr->type);
@@ -462,7 +628,7 @@ int mdns_parse_rr(char* data, int size, FoundAnswerList* alist, int is_answer) {
   parsed += 2;
 
   if(parsed > size) {
-    free(rr);
+    free_resource_record(rr);
     return 0;
   }
 
@@ -473,12 +639,13 @@ int mdns_parse_rr(char* data, int size, FoundAnswerList* alist, int is_answer) {
     mdns_parse_rdata_for_answers(rr, alist);
   }
 
-  free(rr);
+  free_resource_record(rr);
   return parsed;
 }
 
+
 // TODO this only parses the header so far
-  int mdns_parse_message_net(char* data, int size, mDNSMessage* msg, FoundAnswerList* alist) {
+int mdns_parse_message_net(char* data, int size, mDNSMessage* msg, FoundAnswerList* alist) {
 
   int parsed = 0;
   int i;
@@ -503,22 +670,23 @@ int mdns_parse_rr(char* data, int size, FoundAnswerList* alist, int is_answer) {
   }
 
   for(i=0; i < msg->an_count; i++) {
-    parsed += mdns_parse_rr(data+parsed, size-parsed, alist, 1);
+    printf("=============== ANSWER %u\n", i+1);
+    parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 1);
   }
 
   for(i=0; i < msg->ns_count; i++) {
-    parsed += mdns_parse_rr(data+parsed, size-parsed, alist, 0);
+    parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 0);
   }
 
   for(i=0; i < msg->ar_count; i++) {
-    parsed += mdns_parse_rr(data+parsed, size-parsed, alist, 0);
+    parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 0);
   }
 
   // TODO actually parse the rest of message and find real parse size
   return parsed;
 }
 
-mDNSMessage* mdns_build_query_message(char* hostname) {
+mDNSMessage* mdns_build_query_message(char* query_str, uint16_t query_type) {
   mDNSMessage* msg = mdns_make_message();
   mDNSQuestion question;
   mDNSFlags flags;
@@ -538,13 +706,14 @@ mDNSMessage* mdns_build_query_message(char* hostname) {
   msg->flags = htons(mdns_pack_header_flags(flags));
   msg->qd_count = htons(1); // one question
 
-  question.qname = parse_hostname(hostname); // TODO get this from ARGV
+  question.qname = query_str; // TODO get this from ARGV
   //  question.qname = hostname; // TODO get this from ARGV
   if(!question.qname) {
     return NULL;
   }
+
   question.prefer_unicast_response = 0; 
-  question.qtype = 1; // an A record (RFC 1035 section 3.2.2)
+  question.qtype = query_type;
   question.qclass = 1; // class for the internet (RFC 1035 section 3.2.4)
 
   msg->data = mdns_pack_question(&question, &(msg->data_size));
@@ -585,7 +754,7 @@ int parse_received(char* data, int size, FoundAnswerList* alist) {
 }
 
 
-int query(char* query_str, int num_answers, FoundAnswerList* alist) {
+int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList* alist) {
   mDNSMessage* msg;
   char* data;
   size_t data_size;
@@ -603,10 +772,10 @@ int query(char* query_str, int num_answers, FoundAnswerList* alist) {
     fail("could not allocate memory for temporary storage");
   }
 
-  query_for = prepare_domain_name(query_str);
+  query_for = query_str;
 
   // build the query message
-  msg = mdns_build_query_message(query_str);
+  msg = mdns_build_query_message(query_for, query_type);
   data = mdns_pack_message(msg, &data_size);
 
   sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -638,6 +807,7 @@ int query(char* query_str, int num_answers, FoundAnswerList* alist) {
   // keep receiving data indefinitely
   while(1) {
     if(alist->length >= num_answers) {
+      close(sock);
       return alist->length;
     }
     printf("waiting for data\n");
@@ -676,7 +846,7 @@ int main(int argc, char* argv[]) {
 
   int answers;
   FoundAnswerList alist;
-  alist.length = 0;
+  char* query_str;
   
   if(argc != 2) {
     if(argc > 0) {
@@ -687,13 +857,51 @@ int main(int argc, char* argv[]) {
     exit(1);
   }
 
-  // retrieve one answer for query
-  answers = query(argv[1], 1, &alist);
-  if(answers < 1) {
-    fprintf(stderr, "Did not find 1 answer for query: %s\n", argv[1]);
-    return 1;
+  init_answer_list(&alist);
+
+  query_str = prepare_query_string(argv[1]);
+
+  // if this is a query for service type
+  if(argv[1][0] == '_') {
+
+    // retrieve one answer for query
+    answers = query(query_str, DNS_RR_TYPE_PTR, 10, &alist);
+    if(answers < 1) {
+      fprintf(stderr, "Did not find 1 answer for query: %s\n", argv[1]);
+      return 1;
+    }
+    /*
+    query_str = alist.answers[0]->name;
+    alist.answers[0]->name = NULL;
+    clear_answer_list(&alist);
+    
+    answers = query(query_str, DNS_RR_TYPE_SRV, 1, &alist);
+    if(answers < 1) {
+      fprintf(stderr, "Did not find 1 answer for query: %s\n", query_str);
+      return 1;
+    }
+
+    query_str = alist.answers[0]->name;
+    alist.answers[0]->name = NULL;
+    clear_answer_list(&alist);
+    
+    answers = query(query_str, DNS_RR_TYPE_A, 1, &alist);
+    if(answers < 1) {
+      fprintf(stderr, "Did not find 1 answer for query: %s\n", query_str);
+      return 1;
+    }
+    */
+  } else { // this is a query for a domain name
+  
+    // retrieve one answer for query
+    answers = query(query_str, DNS_RR_TYPE_A, 1, &alist);
+    if(answers < 1) {
+      fprintf(stderr, "Did not find 1 answer for query: %s\n", argv[1]);
+      return 1;
+    }
   }
 
+  
 
   return 0;
 }

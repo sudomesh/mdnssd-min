@@ -17,6 +17,9 @@
   DNS RFC: http://tools.ietf.org/html/rfc1035
     Section 4.1, 3.2.2 and 3.2.4
 
+  DNS RFC: http://tools.ietf.org/html/rfc1034
+    Section 3.7.1
+
   DNS Security Extensions RFC: http://tools.ietf.org/html/rfc2535
     Section 6.1
 
@@ -24,10 +27,13 @@
     Section 18.
 
   DNS-SD RFC: http://tools.ietf.org/html/rfc6763
+
+  DNS SRV RFC: http://tools.ietf.org/html/rfc2782
         
 */
 
 #include <stdlib.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -38,7 +44,6 @@
 #include <unistd.h>
 #include <time.h>
 
-#define PROGRAM_NAME "mdnssd"
 #define DNS_HEADER_SIZE (12)
 #define DNS_MAX_HOSTNAME_LENGTH (253)
 #define DNS_MAX_LABEL_LENGTH (63)
@@ -63,7 +68,10 @@
 #define MAX_DEREFERENCE_COUNT (40)
 
 // The maximum number of answers allowed
-#define MAX_ANSWERS (20)
+#define MAX_ANSWERS (200)
+
+#define MAX_RUNTIME (86400)
+
 
 struct mDNSMessageStruct{
   uint16_t id;
@@ -107,10 +115,11 @@ typedef struct {
 } mDNSResourceRecord;
 
 typedef struct {
-  char* name;
-  struct in_addr addr;
-  unsigned short port;
-  int type;
+  mDNSResourceRecord* rr; // the parent RR
+  char* name; // name from PTR
+  char* hostname; // from SRV
+  struct in_addr addr; // from A
+  unsigned short port; // from SRV
 } FoundAnswer;
 
 typedef struct {
@@ -119,29 +128,51 @@ typedef struct {
   size_t length;
 } FoundAnswerList;
 
+int srv_query(char* query_str, int max_answers, FoundAnswerList* alist, FoundAnswerList* final_alist, struct timeval* runtime);
+
+int a_query(char* query_arg, unsigned int port, int max_answers, FoundAnswerList* alist, FoundAnswerList* final_alist, struct timeval* runtime);
+
+char* parse_rr_name(char* message, char* name, int* parsed);
+
+// TODO grrr, global variables
 // The name we're currently querying for;
 char* query_for;
+// is debug mode enabled?
+int debug_mode;
 
+int debug(const char* format, ...) {
+  va_list args;
+  int ret;
+
+  if(!debug_mode) {
+    return 0;
+  }
+  va_start(args, format);
+  ret = vfprintf(stderr, format, args);
+
+  va_end(args);
+  return ret;
+}
 
 void usage(char* argv0) {
-  fprintf(stderr, "Usage: %s <hostname.local>\n", argv0);
+  fprintf(stderr, "Usage: %s [-t <runtime_in_seconds>] <hostname.local>\n", argv0);
 }
 
 void fail(char* msg) {
-  //  fprintf(stderr, "Error: %s\n", msg);
   perror(msg);
   exit(1);
 }
 
 void init_answer_list(FoundAnswerList* alist) {
   int i;
+
   for(i=0; i < MAX_ANSWERS; i++) {
     alist->answers[i] = NULL;
   }
   alist->length = 0;
 }
 
-FoundAnswer* add_answer(FoundAnswerList* alist) {
+FoundAnswer* add_new_answer(FoundAnswerList* alist) {
   FoundAnswer* a;
   if(alist->length >= MAX_ANSWERS) {
     return NULL;
@@ -157,11 +188,22 @@ FoundAnswer* add_answer(FoundAnswerList* alist) {
   return a;
 }
 
+FoundAnswer* add_answer(FoundAnswerList* alist, FoundAnswer* a) {
+  if(alist->length >= MAX_ANSWERS) {
+    return NULL;
+  }
+
+  alist->answers[alist->length] = a;
+  alist->length++;
+  return a;
+}
+
 void clear_answer_list(FoundAnswerList* alist) {
   int i;
   for(i=0; i < MAX_ANSWERS; i++) {
     if(alist->answers[i]) {
       if(alist->answers[i]->name) {
+        // TODO there may be more that needs freeing
         free(alist->answers[i]->name);
       }
       free(alist->answers[i]);
@@ -292,7 +334,7 @@ char* mdns_pack_question(mDNSQuestion* q, size_t* size) {
     fail("domain name too long");
   }
 
-  printf("name length: %u\n", name_length);
+  debug("name length: %u\n", name_length);
 
   *size = name_length + 2 + 2;
 
@@ -325,42 +367,40 @@ void mdns_message_print(mDNSMessage* msg) {
 
   mDNSFlags* flags = mdns_parse_header_flags(msg->flags);
 
-  printf("ID: %u\n", msg->id);
-  printf("Flags: \n");
-  printf("      QR: %u\n", flags->qr);
-  printf("  OPCODE: %u\n", flags->opcode);
-  printf("      AA: %u\n", flags->aa);
-  printf("      TC: %u\n", flags->tc);
-  printf("      RD: %u\n", flags->rd);
-  printf("      RA: %u\n", flags->ra);
-  printf("       Z: %u\n", flags->zero);
-  printf("      AD: %u\n", flags->ad);
-  printf("      CD: %u\n", flags->cd);
-  printf("   RCODE: %u\n", flags->rcode);
-  printf("\n");
-  printf("QDCOUNT: %u\n", msg->qd_count);
-  printf("ANCOUNT: %u\n", msg->an_count);
-  printf("NSCOUNT: %u\n", msg->ns_count);
-  printf("ARCOUNT: %u\n", msg->ar_count);
-  printf("Resource records:\n");
-  //  printf("Data: %s\n",msg->data);
+  debug("ID: %u\n", msg->id);
+  debug("Flags: \n");
+  debug("      QR: %u\n", flags->qr);
+  debug("  OPCODE: %u\n", flags->opcode);
+  debug("      AA: %u\n", flags->aa);
+  debug("      TC: %u\n", flags->tc);
+  debug("      RD: %u\n", flags->rd);
+  debug("      RA: %u\n", flags->ra);
+  debug("       Z: %u\n", flags->zero);
+  debug("      AD: %u\n", flags->ad);
+  debug("      CD: %u\n", flags->cd);
+  debug("   RCODE: %u\n", flags->rcode);
+  debug("\n");
+  debug("QDCOUNT: %u\n", msg->qd_count);
+  debug("ANCOUNT: %u\n", msg->an_count);
+  debug("NSCOUNT: %u\n", msg->ns_count);
+  debug("ARCOUNT: %u\n", msg->ar_count);
+  debug("Resource records:\n");
 
   free(flags);
 }
 
 // parse question section
-int mdns_parse_question(char* data, int size) {
+int mdns_parse_question(char* message, char* data, int size) {
   mDNSQuestion q;
   char* cur;
-  int parsed;
+  int parsed = 0;
 
   cur = data;
   // TODO check for invalid length
-  parsed = strlen(data) + 1;
-  q.qname = data;
+  q.qname = parse_rr_name(message, data, &parsed);
   cur += parsed;
   if(parsed > size) {
-    return 0;
+    fail("qname is too long");
   }
 
   memcpy(&(q.qtype), cur, 2);
@@ -382,54 +422,28 @@ int mdns_parse_question(char* data, int size) {
   return parsed;
 }
 
-void print_rr_name(char* name) {
-  int i;
-  int label_len;
-  int len = strlen(name);
-  if(len < 1) {
-    return;
-  }
-  label_len = (int) name[0];
-  for(i=1; i < len; i++) {
-    if(label_len == 0) {
-      printf(".");
-      label_len = (int) name[i];
-      continue;
-    }
-    printf("%c", name[i]);
-    label_len--;
-  }
-}
-
 // parse A resource record
-int mdns_parse_rr_a(char* data, FoundAnswerList* alist) {
-  FoundAnswer* a;
+int mdns_parse_rr_a(char* data, FoundAnswer* a) {
 
-  a = add_answer(alist);
   memcpy(&(a->addr), data, 4);
+  //  a->type = DNS_RR_TYPE_A;
 
-  printf("A: %s\n", inet_ntoa(a->addr));
+  debug("        A: %s\n", inet_ntoa(a->addr));
 
   return 4;
 }
 
 // parse PTR resource record
-int mdns_parse_rr_ptr(char* data, FoundAnswerList* alist) {
-  int len;
-  FoundAnswer* a;
+int mdns_parse_rr_ptr(char* message, char* data, FoundAnswer* a) {
+  int parsed = 0;
 
-  a = add_answer(alist);
-  len = strlen(data) + 1;
-  a->name = malloc(len);
-  if(!a->name) {
-    fail("failed to allocate memory for PTR name");
-  }
-  memcpy(a->name, data, len);
+  a->name = parse_rr_name(message, data, &parsed);
 
-  printf("PTR: %s\n", a->name);
-  //  print_rr_name(a->name);
+  //  a->type = DNS_RR_TYPE_PTR;
 
-  return len;
+  debug("        PTR: %s\n", a->name);
+
+  return parsed;
 }
 
 // parse CNAME resource record
@@ -445,9 +459,35 @@ int mdns_parse_rr_txt(char* data) {
 }
 
 // parse SRV resource record
-int mdns_parse_rr_srv(char* data) {
+int mdns_parse_rr_srv(char* message, char* data, FoundAnswer* a) {
+  uint16_t priority;
+  uint16_t weight;
+  int parsed = 0;
+  
+  // TODO currently we do nothing with the priority and weight
+  memcpy(&priority, data, 2);
+  priority = ntohs(priority);
+  data += 2;
+  parsed += 2;
 
-  return 0;
+  memcpy(&weight, data, 2);
+  weight = ntohs(weight);
+  data += 2;
+  parsed += 2;
+
+  memcpy(&(a->port), data, 2);
+  a->port = ntohs(a->port);
+  data += 2;
+  parsed += 2;
+
+  //  a->type = DNS_RR_TYPE_SRV;
+
+  a->hostname = parse_rr_name(message, data, &parsed);
+
+  debug("        SRV target: %s\n", a->hostname);
+  debug("        SRV port: %u\n", a->port);
+
+  return parsed;
 }
 
 // get name compression offset
@@ -456,8 +496,6 @@ uint16_t get_offset(char* data) {
 
   memcpy(&offset, data, 2);
   offset = ntohs(offset);
-
-  //  printf("POSSIBLE OFFSET: 0x%x 0x%x\n", data[1], data[0]);
 
   if((offset >> 14) & 3) {
     // this means that the name is a reference to 
@@ -470,6 +508,8 @@ uint16_t get_offset(char* data) {
 };
 
 
+// parse a domain name 
+// of the type included in resource records
 char* parse_rr_name(char* message, char* name, int* parsed) {
 
   int dereference_count = 0;
@@ -485,7 +525,7 @@ char* parse_rr_name(char* message, char* name, int* parsed) {
   if(!out) {
     fail("could not allocate memory for resource record name");
   }
-  //  printf("-- NAME\n");
+
   while(1) {
     offset = get_offset(name);
     if(offset) {
@@ -493,7 +533,6 @@ char* parse_rr_name(char* message, char* name, int* parsed) {
         pars += 2; // parsed two bytes before jump
       }
       did_jump = 1;
-      //      printf("--- JUMP!\n");
       name = message + offset;
       dereference_count++;
       if(dereference_count >= MAX_DEREFERENCE_COUNT) {
@@ -512,7 +551,7 @@ char* parse_rr_name(char* message, char* name, int* parsed) {
         return NULL;
       }
     }
-    // it wasn't an offset, so it must be a length
+    // it wasn't an offset, so it must be a string length
     label_len = (int) name[0];
     name++;
     if(!did_jump) {
@@ -520,7 +559,6 @@ char* parse_rr_name(char* message, char* name, int* parsed) {
     }
     for(i=0; i < label_len; i++) {
       out[out_i++] = name[i];
-      //      printf("---- %c\n", name[i]);
       if(out_i+1 >= MAX_RR_NAME_SIZE) {
         free(out);
         return NULL;
@@ -531,7 +569,6 @@ char* parse_rr_name(char* message, char* name, int* parsed) {
     }
     name += label_len;
     if(name[0] == '\0') {
-      //      printf("---- END\n");
       out[out_i] = '\0';
       if(!did_jump) {
         pars++;
@@ -543,26 +580,22 @@ char* parse_rr_name(char* message, char* name, int* parsed) {
 }
 
 
-void mdns_parse_rdata_for_answers(mDNSResourceRecord* rr, FoundAnswerList* alist) {
-
-  // if the resource record is not relevant
-  // to the current query, then we don't care about it
-  if(strcmp(rr->name, query_for) != 0) {
-    return;
-  }
+void mdns_parse_rdata_type(char* message, mDNSResourceRecord* rr, FoundAnswer* answer) {
 
   switch(rr->type) {
   case DNS_RR_TYPE_A:
-    mdns_parse_rr_a(rr->rdata, alist);
+    mdns_parse_rr_a(rr->rdata, answer);
     break;
   case DNS_RR_TYPE_PTR:
-    mdns_parse_rr_ptr(rr->rdata, alist);
+    mdns_parse_rr_ptr(message, rr->rdata, answer);
+    break;
+  case DNS_RR_TYPE_SRV:
+    mdns_parse_rr_srv(message, rr->rdata, answer);
     break;
   case DNS_RR_TYPE_CNAME:
   case DNS_RR_TYPE_TXT:
-  case DNS_RR_TYPE_SRV:
   default:
-    printf("skipped irrelevant rr_data type %u\n", rr->type);
+    debug("      [skipped irrelevant record]\n");
   }
 }
 
@@ -582,35 +615,35 @@ int mdns_parse_rr(char* message, char* rrdata, int size, FoundAnswerList* alist,
   mDNSResourceRecord* rr;
   int parsed = 0;
   char* cur = rrdata;
+  FoundAnswer* answer;
+
   rr = malloc(sizeof(mDNSResourceRecord));
   rr->name = NULL;
 
   rr->name = parse_rr_name(message, rrdata, &parsed);
   if(!rr->name) {
-    printf("FAAAAAAAAAAAAIL\n");
+    // TODO are calling functions dealing with this correctly?
+    fprintf(stderr, "parsing resource record name failed\n");
     return 0;
   }
 
-  printf("parsed: %u\n", parsed);
-
   cur += parsed;
 
-  // +10 because type, class, ttl and rdata_lenth total 10 bytes
+  // +10 because type, class, ttl and rdata_lenth 
+  // take up total 10 bytes
   if(parsed+10 > size) {
     free_resource_record(rr);
     return 0;
   }
 
-  printf("  Resource Record Name: %s\n", rr->name);
-  //  printf("  Resource Record for ");
-  //  print_rr_name(rr->name);
-  //  printf(":\n");
-  printf("------------------------------\n");
-
+  debug("      Resource Record Name: %s\n", rr->name);
+  
   memcpy(&(rr->type), cur, 2);
   rr->type = ntohs(rr->type);
   cur += 2;
   parsed += 2;
+
+  debug("      Resource Record Type: %u\n", rr->type);
 
   memcpy(&(rr->class), cur, 2);
   rr->class = ntohs(rr->class);
@@ -636,10 +669,14 @@ int mdns_parse_rr(char* message, char* rrdata, int size, FoundAnswerList* alist,
   parsed += rr->rdata_length;
   
   if(is_answer) {
-    mdns_parse_rdata_for_answers(rr, alist);
+    answer = add_new_answer(alist);
+    answer->rr = rr;
+    mdns_parse_rdata_type(message, rr, answer);
   }
 
-  free_resource_record(rr);
+  debug("    ------------------------------\n");
+
+  //  free_resource_record(rr);
   return parsed;
 }
 
@@ -665,24 +702,27 @@ int mdns_parse_message_net(char* data, int size, mDNSMessage* msg, FoundAnswerLi
 
   mdns_message_print(msg);
 
+  debug("  Question records [%u] (not shown)\n", msg->qd_count);
   for(i=0; i < msg->qd_count; i++) {
-    parsed += mdns_parse_question(data+parsed, size-parsed);
+    parsed += mdns_parse_question(data, data+parsed, size-parsed);
   }
 
+  debug("  Answer records [%u]\n", msg->an_count);
   for(i=0; i < msg->an_count; i++) {
-    printf("=============== ANSWER %u\n", i+1);
+    debug("    Answer record %u of %u\n", i+1, msg->an_count);
     parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 1);
   }
 
+  debug("  Nameserver records [%u] (not shown)\n", msg->ns_count);
   for(i=0; i < msg->ns_count; i++) {
     parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 0);
   }
 
+  debug("  Additional records [%u] (not shown)\n", msg->ns_count);
   for(i=0; i < msg->ar_count; i++) {
-    parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 0);
+    parsed += mdns_parse_rr(data, data+parsed, size-parsed, alist, 1);
   }
 
-  // TODO actually parse the rest of message and find real parse size
   return parsed;
 }
 
@@ -706,8 +746,8 @@ mDNSMessage* mdns_build_query_message(char* query_str, uint16_t query_type) {
   msg->flags = htons(mdns_pack_header_flags(flags));
   msg->qd_count = htons(1); // one question
 
-  question.qname = query_str; // TODO get this from ARGV
-  //  question.qname = hostname; // TODO get this from ARGV
+  question.qname = query_str;
+
   if(!question.qname) {
     return NULL;
   }
@@ -753,8 +793,7 @@ int parse_received(char* data, int size, FoundAnswerList* alist) {
   return res;
 }
 
-
-int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList* alist) {
+void query(char* query_str, uint16_t query_type, int min_answers, FoundAnswerList* alist, struct timeval* runtime) {
   mDNSMessage* msg;
   char* data;
   size_t data_size;
@@ -766,6 +805,9 @@ int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList
   int resp;
   int parsed;
   char* recvdata;
+  fd_set active_fd_set;
+  fd_set read_fd_set;
+  fd_set except_fd_set;
 
   recvdata = malloc(DNS_BUFFER_SIZE);
   if(!recvdata) {
@@ -778,6 +820,7 @@ int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList
   msg = mdns_build_query_message(query_for, query_type);
   data = mdns_pack_message(msg, &data_size);
 
+  debug("Opening socket\n");
   sock = socket(AF_INET, SOCK_DGRAM, 0);
   if(sock < 0) {
     fail("error opening socket");
@@ -788,7 +831,7 @@ int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList
   addr.sin_addr.s_addr = inet_addr(MDNS_MULTICAST_ADDRESS);
   addrlen = sizeof(addr);
 
-  printf("binding\n");
+  debug("Binding socket\n");
   res = bind(sock, (struct sockaddr *) &addr, addrlen);
   if(res < 0) {
     fail("error binding socket");
@@ -796,33 +839,63 @@ int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList
 
   mreq.imr_multiaddr.s_addr = inet_addr(MDNS_MULTICAST_ADDRESS);
   mreq.imr_interface.s_addr = htonl(INADDR_ANY); // TODO understand this  
+  debug("Setting socket options for multicast\n");
   if(setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
     fail("setsockopt failed");
   } 
 
-  printf("sending query with length: %u\n", data_size);
+  debug("Sending DNS message with length: %u\n", data_size);
   // send query message
   res = sendto(sock, data, data_size, 0, (struct sockaddr *) &addr, addrlen);
 
+  FD_ZERO(&active_fd_set);
+  FD_SET(sock, &active_fd_set);
+
+  debug("Waiting for incoming data\n");
+
   // keep receiving data indefinitely
   while(1) {
-    if(alist->length >= num_answers) {
-      close(sock);
-      return alist->length;
+    if(alist->length >= min_answers) {
+      debug("Gathered %u answers out of minimum %u required\n", alist->length, min_answers);
+      break;
     }
-    printf("waiting for data\n");
 
-    // note: DNS messages should arrive as single packets, so we don't need to worry
-    //       about partially received messages
+    read_fd_set = active_fd_set;
+    except_fd_set = active_fd_set;
+    res = select(FD_SETSIZE, &read_fd_set, NULL, &except_fd_set, runtime);
+    if(res < 0) {
+      fail("select() call failed");
+    }
+
+    if(res == 0) {
+      if((runtime->tv_sec <= 0) && (runtime->tv_usec <= 0)) {
+        break;
+      }
+      continue;
+    }
+
+    if(FD_ISSET(sock, &except_fd_set)) {
+      fail("exception on socket");
+    }
+
+    if(!FD_ISSET(sock, &read_fd_set)) {
+      // I don't even know how we'd ever get here...
+      continue;
+    }
+
+    // DNS messages should arrive as single packets
+    // so we don't need to worry about partial receives
+    debug("Receiving data\n");
     res = recvfrom(sock, recvdata, DNS_BUFFER_SIZE, 0, (struct sockaddr *) &addr, &addrlen);
     if(res < 0) {
       fail("error receiving");
     } else if(res == 0) {
       fail("unknown error"); // TODO for TCP means connection closed, but for UDP?
     }
-    printf("got data from %s\n", inet_ntoa(addr.sin_addr));
+    debug("Received %u bytes from %s\n", res, inet_ntoa(addr.sin_addr));
 
     parsed = 0;
+    debug("Attempting to parse received data\n");
     do {
       resp = parse_received(recvdata+parsed, res, alist);
       // if nothing else is parsable, stop parsing
@@ -830,78 +903,253 @@ int query(char* query_str, uint16_t query_type, int num_answers, FoundAnswerList
         break;
       }
       parsed += resp;
-      printf("--- parsed %u vs. received %u\n", parsed, res);
+      debug("--Parsed %u bytes of %u received bytes\n", parsed, res);
     } while(parsed < res); // while there is still something to parse
+    debug("Finished parsing received data\n");
   }
 
-  free(query_for);
+  close(sock);
   query_for = NULL;
+  free(recvdata);
 
-  free(recvdata);  
-  
+  return;
+}
+
+// search argv for either stand-along
+// arguments like -d or arguments with a value
+// like -t 5
+int get_arg(int argc, char* argv[], char* key, char** val) {
+  int i;
+  for(i=1; i < argc; i++) {
+    if(strcmp(argv[i], key) == 0) {
+      if(val) { // expecting a value
+        if(argc < i+2) {
+          continue;
+        }
+        *val = argv[i+1];
+        return 1;
+      } else { // not expecting a value
+        return 1;
+      }
+
+    }
+  }
   return 0;
 }
 
+int out_of_time(struct timeval* t) {
+  if((t->tv_sec <= 0) && (t->tv_usec <= 0)) {
+    return 1;
+  }
+  return 0;
+}
+
+// run a query for a service type
+int ptr_query(char* query_arg, int max_answers, FoundAnswerList* final_alist, struct timeval* runtime) {
+  int i;
+  FoundAnswerList alist; // results from last query
+  FoundAnswer* answer = NULL;  
+  char* query_str = prepare_query_string(query_arg);
+
+  // TODO where do we free this?!
+  init_answer_list(&alist);
+
+  do {
+
+    // do a single query 
+    query(query_str, DNS_RR_TYPE_PTR, 1, &alist, runtime);
+    
+    for(i=0; i < alist.length; i++) {
+      answer = alist.answers[i];
+      if(!answer) {
+        continue;
+      }
+
+      // remove if this is a PTR record but not
+      // an answer to our query
+      if(answer->rr->type == DNS_RR_TYPE_PTR) {
+        //        printf("  --name: %s\n", answer->name);
+        //        printf("  --name: %s\n", query_arg);
+        if(strcmp(answer->rr->name, query_arg) != 0) {
+          alist.answers[i] = NULL;
+          continue;
+        }
+        srv_query(answer->name, max_answers, &alist, final_alist, runtime);
+      }
+    }
+    
+    // keep querying until we have enought answers
+    // or we run out of time
+  } while((final_alist->length < max_answers) && !out_of_time(runtime));
+
+  free(query_str);
+
+  return 0;
+}
+
+// run a query for a service
+int srv_query(char* query_arg, int max_answers, FoundAnswerList* alist, FoundAnswerList* final_alist, struct timeval* runtime) {
+  int i;
+  int firstrun = 1;
+  FoundAnswer* answer = NULL;
+  char* query_str = prepare_query_string(query_arg);
+
+  do {
+
+    // skip this on first run since we 
+    // may already have the answer
+    if(!firstrun) {
+      clear_answer_list(alist);
+      query(query_str, DNS_RR_TYPE_SRV, 1, alist, runtime);
+      firstrun = 0;
+    }
+
+    for(i=0; i < alist->length; i++) {
+      answer = alist->answers[i];
+      if(!answer) {
+        continue;
+      }
+
+      // remove if this is a SRV record but not
+      // an answer to our query
+      if(answer->rr->type == DNS_RR_TYPE_SRV) {
+        if(strcmp(answer->rr->name, query_arg) != 0) {
+          alist->answers[i] = NULL;
+          continue;
+        }
+
+        a_query(answer->hostname, answer->port, max_answers, alist, final_alist, runtime);
+      }
+    }
+    
+    // keep querying until we have enought answers
+    // or we run out of time
+  } while((final_alist->length < max_answers) && !out_of_time(runtime));
+
+  free(query_str);
+
+  return 0;
+}
+
+// run a query for an A record
+int a_query(char* query_arg, unsigned int port, int max_answers, FoundAnswerList* alist, FoundAnswerList* final_alist, struct timeval* runtime) {
+  int i;
+  int firstrun = 1;
+  FoundAnswer* answer = NULL;
+  char* query_str = prepare_query_string(query_arg);
+
+  do {
+
+    // skip this on first run since we 
+    // may already have the answer
+    if(!firstrun) {
+      clear_answer_list(alist);
+      query(query_str, DNS_RR_TYPE_SRV, 1, alist, runtime);
+      firstrun = 0;
+    }
+
+    for(i=0; i < alist->length; i++) {
+      answer = alist->answers[i];
+      if(!answer) {
+        continue;
+      }
+      // remove if this is a SRV record but not
+      // an answer to our query
+      if(answer->rr->type == DNS_RR_TYPE_A) {
+        if(strcmp(answer->rr->name, query_arg) != 0) {
+          alist->answers[i] = NULL;
+          continue;
+        }
+        answer->hostname = query_arg;
+        answer->port = port;
+        add_answer(final_alist, answer);
+      }
+    }
+    
+    // keep querying until we have enought answers
+    // or we run out of time
+  } while((final_alist->length < max_answers) && !out_of_time(runtime));
+
+  free(query_str);
+
+  return 0;
+}
+
+
+void print_answers(FoundAnswerList* alist) {
+
+  int i;
+  FoundAnswer* answer = NULL;
+
+  for(i=0; i < alist->length; i++) {
+    answer = alist->answers[i];
+    if(!answer) {
+        continue;
+    }
+
+    printf("%s\t%s\t%u\n", answer->hostname, inet_ntoa(answer->addr), answer->port);
+
+  }
+}
+
+
 int main(int argc, char* argv[]) {
 
-  int answers;
+  struct timeval runtime;
   FoundAnswerList alist;
-  char* query_str;
-  
-  if(argc != 2) {
-    if(argc > 0) {
-      usage(argv[0]);
-    } else {
-      usage(PROGRAM_NAME);
-    }
+  char* query_arg;
+  int ret;
+  char* arg_val;
+  int num_answers = 1;
+
+  debug_mode = 0;
+
+  // default runtime 3 seconds
+  runtime.tv_sec = 3;
+  runtime.tv_usec = 0;
+
+  if(argc < 2) {
+    usage(argv[0]);
     exit(1);
   }
 
-  init_answer_list(&alist);
-
-  query_str = prepare_query_string(argv[1]);
-
-  // if this is a query for service type
-  if(argv[1][0] == '_') {
-
-    // retrieve one answer for query
-    answers = query(query_str, DNS_RR_TYPE_PTR, 10, &alist);
-    if(answers < 1) {
-      fprintf(stderr, "Did not find 1 answer for query: %s\n", argv[1]);
-      return 1;
+  // get timeout argument
+  ret = get_arg(argc, argv, "-t", &arg_val);
+  if(ret) {
+    ret = atoi(arg_val);
+    if((ret < 0) || (ret > MAX_RUNTIME)) {
+      usage(argv[0]);
+      exit(1);
     }
-    /*
-    query_str = alist.answers[0]->name;
-    alist.answers[0]->name = NULL;
-    clear_answer_list(&alist);
-    
-    answers = query(query_str, DNS_RR_TYPE_SRV, 1, &alist);
-    if(answers < 1) {
-      fprintf(stderr, "Did not find 1 answer for query: %s\n", query_str);
-      return 1;
-    }
-
-    query_str = alist.answers[0]->name;
-    alist.answers[0]->name = NULL;
-    clear_answer_list(&alist);
-    
-    answers = query(query_str, DNS_RR_TYPE_A, 1, &alist);
-    if(answers < 1) {
-      fprintf(stderr, "Did not find 1 answer for query: %s\n", query_str);
-      return 1;
-    }
-    */
-  } else { // this is a query for a domain name
-  
-    // retrieve one answer for query
-    answers = query(query_str, DNS_RR_TYPE_A, 1, &alist);
-    if(answers < 1) {
-      fprintf(stderr, "Did not find 1 answer for query: %s\n", argv[1]);
-      return 1;
-    }
+    runtime.tv_sec = ret;    
   }
 
-  
+  // get timeout argument
+  ret = get_arg(argc, argv, "-d", NULL);
+  if(ret) {
+    debug_mode = 1;
+  }
+
+  // last argument should be query
+  query_arg = argv[argc-1];
+
+  // TODO where do we free this?!
+  init_answer_list(&alist);
+
+  // if it start with an underscore, 
+  // assume it's a query for a service type
+  if(query_arg[0] == '_') {
+
+    ptr_query(query_arg, num_answers, &alist, &runtime);
+    print_answers(&alist);
+    
+  } else { // this is a query for a host name
+
+    fail("only service queries currently supported");
+
+    //    srv_query(query_str, num_answers, &alist, &runtime);
+
+  }
 
   return 0;
 }

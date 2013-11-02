@@ -44,95 +44,7 @@
 #include <unistd.h>
 #include <time.h>
 
-#define DNS_HEADER_SIZE (12)
-#define DNS_MAX_HOSTNAME_LENGTH (253)
-#define DNS_MAX_LABEL_LENGTH (63)
-#define MDNS_MULTICAST_ADDRESS "224.0.0.251"
-#define MDNS_PORT (5353)
-#define DNS_BUFFER_SIZE (32768)
-
-// TODO find the right number for this
-#define DNS_MESSAGE_MAX_SIZE (4096)
-
-// DNS Resource Record types
-// (RFC 1035 section 3.2.2)
-#define DNS_RR_TYPE_A (1)
-#define DNS_RR_TYPE_CNAME (5)
-#define DNS_RR_TYPE_PTR (12)
-#define DNS_RR_TYPE_TXT (16)
-#define DNS_RR_TYPE_SRV (33)
-
-// TODO not sure about this
-#define MAX_RR_NAME_SIZE (256)
-
-#define MAX_DEREFERENCE_COUNT (40)
-
-// The maximum number of answers allowed
-#define MAX_ANSWERS (200)
-
-#define MAX_RUNTIME (86400)
-
-
-struct mDNSMessageStruct{
-  uint16_t id;
-  uint16_t flags;
-  uint16_t qd_count;
-  uint16_t an_count;
-  uint16_t ns_count;
-  uint16_t ar_count;
-  char* data;
-  size_t data_size;
-} __attribute__((__packed__)); // ensure that struct is packed
-typedef struct mDNSMessageStruct mDNSMessage;
-
-typedef struct {
-  int qr;
-  int opcode;
-  int aa;
-  int tc;
-  int rd;
-  int ra;
-  int zero;
-  int ad;
-  int cd;
-  int rcode;
-} mDNSFlags;
-
-typedef struct {
-  char* qname;
-  uint16_t qtype;
-  uint16_t qclass;
-  int prefer_unicast_response;
-} mDNSQuestion;
-
-typedef struct {
-  char* name;
-  uint16_t type;
-  uint16_t class;
-  uint32_t ttl;
-  uint16_t rdata_length;
-  void* rdata;
-} mDNSResourceRecord;
-
-typedef struct {
-  mDNSResourceRecord* rr; // the parent RR
-  char* name; // name from PTR
-  char* hostname; // from SRV
-  struct in_addr addr; // from A
-  unsigned short port; // from SRV
-  int query_sent; // was a query
-} FoundAnswer;
-
-typedef struct {
-  // TODO should use linked list?
-  FoundAnswer* answers[MAX_ANSWERS]; 
-  size_t length;
-  size_t completed_length; // number of complete answers (answers that have both an IP and a port number)
-} FoundAnswerList;
-
-int is_answer_complete(FoundAnswer* a);
-
-char* parse_rr_name(char* message, char* name, int* parsed);
+#include "mdnssd-min.h"
 
 // TODO grrr, global variables
 // The name we're currently querying for;
@@ -225,7 +137,6 @@ void clear_answer_list(FoundAnswerList* alist) {
   }
   alist->length = 0;
 }
-
 
 char* prepare_query_string(char* name) {
   int i;
@@ -458,18 +369,6 @@ int mdns_parse_rr_ptr(char* message, char* data, FoundAnswer* a) {
   debug("        PTR: %s\n", a->name);
 
   return parsed;
-}
-
-// parse CNAME resource record
-int mdns_parse_rr_cname(char* data) {
-
-  return 0;
-}
-
-// parse TXT resource record
-int mdns_parse_rr_txt(char* data) {
-
-  return 0;
 }
 
 // parse SRV resource record
@@ -1007,7 +906,6 @@ void complete_answers(int sock, char* query_arg, FoundAnswerList* alist) {
     complete_answer(sock, alist, a);
   }
 }
-
 
 void main_loop(int sock, char* query_arg, int min_answers, FoundAnswerList* alist, struct timeval* runtime) {
   struct sockaddr_in addr;

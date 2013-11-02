@@ -9,7 +9,11 @@ mdnssd-mini is a minimal client for mDNS and DNS-SD that is designed to do only 
 
   2. Use mDNS to resolve the IP addresses for all results returned by the DNS-SD query.
 
-In other words, it returns the IP and port for each instance of a service running on connected LANs.
+In other words, it returns the hostname, IP and port for each instance of a service of a specified type running on connected LANs.
+
+Example usage:
+
+./mdnssd _workstation._tcp.local
 
 There are some things that this program should do, according to RFC 6762 and 6763, that it does not do, such as, but not limited to:
 
@@ -23,18 +27,22 @@ There are some things that this program should do, according to RFC 6762 and 676
 
   4. It only works with multicast queries and responses.
 
+  5. It only supports IPv4
+
 ToDo:
 
   1. Support waiting for a certain minimum number of results to arrive.
 
   2. Fix memory leaks.
 
-  3. Implement continuous operation support.
-     Cache queries until TTL experies.
+  3. Add IPv6 support
 
-  4. Add TXT record support.
+  4. Implement continuous operation support.
+     Cache queries until TTL experies. 
+
+  5. Add TXT record support.
      
-  5. Implement unicast reply support.
+  6. Implement unicast reply support.
 
 
 Alternatives available on OpenWRT:

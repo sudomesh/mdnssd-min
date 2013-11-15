@@ -1,12 +1,12 @@
 /*
   
-  whoisrunning
+  mdnssd-min
 
-  whoisrunning is a minimal DNS-SD and mDNS client that takes a service type
+  mdnssd-min is a minimal DNS-SD and mDNS client that takes a service type
   as its argument and returns the IPv4 and/or IPv6 addreses and port numbers
   running a service of the type.
 
-  Usage: whoisrunning <service_type>
+  Usage: mdnssd-min <service_type>
   
   License: GPLv3
   Author: juul@sudomesh.org

@@ -107,7 +107,8 @@ FoundAnswer* add_new_answer(FoundAnswerList* alist) {
   a->name = NULL;
   a->hostname = NULL;
   a->port = 0;
-  a->query_sent = 0;
+  a->srv_query_sent = 0;
+  a->a_query_sent = 0;
   a->addr.s_addr = 0;
   alist->answers[alist->length] = a;
   alist->length++;
@@ -749,7 +750,7 @@ void print_answers(FoundAnswerList* alist) {
       continue;
     }
 
-    printf("%s\t\t%s\t\t%u\n", answer->hostname, inet_ntoa(answer->addr), answer->port);
+    printf("%s\t%s\t%u\n", answer->hostname, inet_ntoa(answer->addr), answer->port);
 
   }
 }
@@ -871,12 +872,18 @@ void complete_answer(int sock, FoundAnswerList* alist, FoundAnswer* a) {
   // if answer is still not complete
   // send additional query
   if(!a->hostname || !a->port) {
-    send_query(sock, a->name, DNS_RR_TYPE_SRV);
-    // TODO handle return value
+    if(!a->srv_query_sent) {
+      send_query(sock, a->name, DNS_RR_TYPE_SRV);
+      a->srv_query_sent = 1;
+      // TODO handle return value
+    }
   } else {
     if(!a->addr.s_addr) {
-      send_query(sock, a->hostname, DNS_RR_TYPE_PTR);
-      // TODO handle return value
+      if(a->a_query_sent) {
+        send_query(sock, a->hostname, DNS_RR_TYPE_PTR);
+        a->a_query_sent = 1;
+        // TODO handle return value
+      }
     }
   }
 }
@@ -894,7 +901,7 @@ void complete_answers(int sock, char* query_arg, FoundAnswerList* alist) {
     }
     // skip complete answers and imcomplete answers 
     // for which we have already sent a query
-    if(is_answer_complete(a) || a->query_sent) {
+    if(is_answer_complete(a) || (a->srv_query_sent && a->a_query_sent)) {
       continue;
     }
 

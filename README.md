@@ -1,4 +1,3 @@
-
 # About #
 
 mdnssd-min is a minimal client for mDNS and DNS-SD that is designed to do only the following:
@@ -99,6 +98,12 @@ This only works for mDNS, not for DNS-SD, and requires bind-libs which has an ip
 
 
 Note: The priority and weight fields of SRV records are not reported.
+
+# Testing, stability and security #
+
+This software has only been tested against [Avahi](http://avahi.org/). It is possible and even likely that there are other DNS-SD and mDNS implementations out there that cause this software to fail spectacularly, or that maliciously crafted packets could be used to gain access to system running this program. Use at your own risk.
+
+If you find any issues, please report them using the github issue tracker or to the author directly.
 
 # License #
 

@@ -3,7 +3,7 @@ NOTE: This program is a work in progress. Don't expect it to work yet.
 
 License: GPLv3
 
-mdnssd-mini is a minimal client for mDNS and DNS-SD that is designed to do only the following:
+mdnssd-min is a minimal client for mDNS and DNS-SD that is designed to do only the following:
 
   1. Use DNS-SD over mDNS to search for a specified service type on one interface.
 

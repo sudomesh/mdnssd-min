@@ -10,7 +10,7 @@
   
   License: GPLv3
   Author: juul@sudomesh.org
-  Copyright Marc Juul Christoffersen 2013.
+  Copyright 2013-2014 Marc Juul Christoffersen.
 
   References:
 
@@ -70,10 +70,11 @@ void usage(char* argv0) {
   fprintf(stderr, "Given a service type, return a set of hostnames, IPs and port numbers\n");
   fprintf(stderr, "for instances of services of the given type.\n");
   fprintf(stderr, "\n");
-  fprintf(stderr, "Usage: %s [-a <answers>] [-t <time>] <_service._type.local>\n", argv0);
+  fprintf(stderr, "Usage: %s [-a <answers>] [-t <time>] [-d] <_service._type.local>\n", argv0);
   fprintf(stderr, "\n");
-  fprintf(stderr, "  answers: The minimum number of answers wanted (default: 1) [optional]\n");
-  fprintf(stderr, "  time: The maximum number of seconds to wait for answers (default: 3) [optional]\n");
+  fprintf(stderr, "  answers: Minimum number of answers wanted (default: 1) [optional]\n");
+  fprintf(stderr, "  time: Maximum number of seconds to wait for answers (default: 3) [optional]\n");
+  fprintf(stderr, "  -d: Enable very verbose debug output [optional]\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "Example usage: %s -a 2 -t 10 _workstation._tcp.local\n", argv0);
   fprintf(stderr, "\n");

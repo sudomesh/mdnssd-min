@@ -10,7 +10,7 @@ When run, it returns the hostname, IP and port for each instance of a service of
 
 # Features #
 
-* Requires no libraries (other than glibc)
+* Requires no libraries (other than a libc of some kind)
 * Small size: 18 KB (without debugging symbols on x86)
 * Simple operation
 * Helpful debug mode

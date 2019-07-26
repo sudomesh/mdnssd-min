@@ -59,8 +59,8 @@ Return value is always 0 unless an error is encountered.
 There are some things that this program should do, according to RFC 6762 and 6763, that it does not do, such as, but not limited to:
 
 * It does not care about TTL at all, so:
-   ** No expiration of cached results.
-   ** No re-sending of a query after TTL expiration.
+    * No expiration of cached results.
+    * No re-sending of a query after TTL expiration.
 * It completely ignores negative responses.
 * It never sends any Known-Answer records.
 * It only works with multicast queries and responses.
@@ -75,8 +75,8 @@ This program was designed to be used in the sudo mesh firmware (based on OpenWRT
 * Support waiting for a certain minimum number of results to arrive.
 * Add IPv6 support
 * Implement continuous operation support.
-   ** Cache queries until TTL experies. 
-   ** Check for and fix potential memory leaks.
+    * Cache queries until TTL experies. 
+    * Check for and fix potential memory leaks.
 * Add TXT record support.
 * Implement unicast reply support.
 

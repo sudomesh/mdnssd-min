@@ -788,6 +788,7 @@ int init_socket() {
 
   int sock;
   int res;
+  int do_reuse_addr;
   struct ip_mreq mreq;
   struct sockaddr_in addr;
   socklen_t addrlen;
@@ -796,6 +797,12 @@ int init_socket() {
   sock = socket(AF_INET, SOCK_DGRAM, 0);
   if(sock < 0) {
     fail("error opening socket");
+  }
+
+  do_reuse_addr = 1;
+  res = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &do_reuse_addr, sizeof(do_reuse_addr));
+  if(res < 0) {
+    fail( "error setting reuse addr sockopt" );
   }
 
   // TODO this is repeated a few times in this program

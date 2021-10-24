@@ -107,6 +107,9 @@ This software has only been tested against [Avahi](http://avahi.org/). It is pos
 
 If you find any issues, please report them using the github issue tracker or to the author directly.
 
-# License #
+# License and Copyright #
 
-This software is licensed under GPLv3.
+This software is licensed under GPLv3. See `LICENSE` file for detail.
+
+* Copyright 2013 Marc Juul Christoffersen
+* Copyright 2021 [zifengqi123](https://github.com/zifengqi123) (memory leak fixes)

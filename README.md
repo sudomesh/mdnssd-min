@@ -11,7 +11,7 @@ When run, it returns the hostname, IP and port for each instance of a service of
 # Features #
 
 * Requires no libraries (other than a libc of some kind)
-* Small size: 18 KB (without debugging symbols on x86)
+* Small size: <14 kB (without debugging symbols on ARM)
 * Simple operation
 * Helpful debug mode
 

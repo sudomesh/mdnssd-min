@@ -134,6 +134,18 @@ void clear_answer_list(FoundAnswerList* alist) {
         // TODO there may be more that needs freeing
         free(alist->answers[i]->name);
       }
+
+      if(alist->answers[i]->hostname != NULL) {
+        free(alist->answers[i]->hostname);
+      }
+
+      if(alist->answers[i]->rr != NULL) {
+        if(alist->answers[i]->rr->name != NULL) {
+          free(alist->answers[i]->rr->name);
+        }
+        free(alist->answers[i]->rr);
+      }
+
       free(alist->answers[i]);
     }
   }
@@ -327,6 +339,9 @@ int mdns_parse_question(char* message, char* data, int size) {
   q.qname = parse_rr_name(message, data, &parsed);
   cur += parsed;
   if(parsed > size) {
+    if(q.qname != NULL) {
+      free(q.qname);
+    }
     fail("qname is too long");
   }
 
@@ -335,6 +350,9 @@ int mdns_parse_question(char* message, char* data, int size) {
   cur += 2;
   parsed += 2;
   if(parsed > size) {
+    if(q.qname != NULL) {
+      free(q.qname);
+    }
     return 0;
   }
 
@@ -343,9 +361,15 @@ int mdns_parse_question(char* message, char* data, int size) {
   cur += 2;
   parsed += 2;
   if(parsed > size) {
+    if(q.qname != NULL) {
+      free(q.qname);
+    }
     return 0;
   }
   
+  if(q.qname != NULL) {
+    free(q.qname);
+  }
   return parsed;
 }
 
@@ -780,6 +804,22 @@ int send_query(int sock, char* query_arg, uint16_t query_type) {
   debug("Sending DNS message with length: %u\n", data_size);
   // send query message
   res = sendto(sock, data, data_size, 0, (struct sockaddr *) &addr, addrlen);
+
+  if(query_str != NULL) {
+    free(query_str);
+  }
+
+  if(msg->data != NULL) {
+    free(msg->data);
+  }
+
+  if(msg != NULL) {
+    free(msg);
+  }
+
+  if(data != NULL) {
+    free(data);
+  }
   
   return res;
 }
@@ -861,6 +901,7 @@ void complete_answer(int sock, FoundAnswerList* alist, FoundAnswer* a) {
         if(strcmp(a->name, b->rr->name) == 0) {
           a->hostname = b->hostname;
           a->port = b->port;
+          b->hostname = NULL;
         }
       }
     } else {
@@ -1086,6 +1127,8 @@ int main(int argc, char* argv[]) {
 
   main_loop(sock, query_arg, min_answers, &alist, &runtime);
   print_answers(&alist);
+
+  clear_answer_list(&alist);
 
   return 0;
 }
